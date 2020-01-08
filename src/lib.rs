@@ -157,21 +157,26 @@ impl<T, const CHUNK_CAPACITY: usize> List<T, CHUNK_CAPACITY> {
                     //
                     //   - The value at `idx` is initialized as part of the safety invariant of
                     //     `Self`, so the final `&* ...as_ptr()` is also sound.
-                    debug_assert!(idx < CHUNK_CAPACITY);
+                    debug_assert!(chunk.len.get() <= CHUNK_CAPACITY);
+                    debug_assert!(idx < chunk.len.get());
                     &*(&*chunk.buffer.get_unchecked(idx).get()).as_ptr()
                 };
                 let idx = idx + 1;
-                if idx >= chunk.len.get() {
-                    state = chunk.next.get().map(|ptr| (
-                        unsafe {
-                            // Safety: valid pointer as part of safety invariant
-                            &*ptr.as_ptr()
-                        },
-                        0,
-                    ));
-                } else {
-                    state = Some((chunk, idx));
-                }
+                state =
+                    if idx >= chunk.len.get() {
+                        chunk.next.get().map(|ptr| (
+                            // chunk
+                            unsafe {
+                                // Safety: valid pointer as part of safety invariant
+                                &*ptr.as_ptr()
+                            },
+                            // idx
+                            0,
+                        ))
+                    } else {
+                        Some((chunk, idx))
+                    }
+                ;
                 ret
             })
         })
@@ -186,29 +191,29 @@ impl<T, const CHUNK_CAPACITY: usize> Drop for List<T, CHUNK_CAPACITY> {
             self.last = None; // No more aliasing.
         }
         let mut cursor = self.head;
-        while let Some(mut chunk) = cursor {
-            let chunk: &mut Chunk<_, CHUNK_CAPACITY> = unsafe { chunk.as_mut() };
+        while let Some(chunk) = cursor {
+            let mut chunk: Box<Chunk<_, CHUNK_CAPACITY>> = unsafe {
+                // # Safety
+                //
+                //   - The safety invariant of `Self` relies on the chunks having been
+                //     `Box`-allocated.
+                //
+                //   - Since `last` is no longer used, aliasing is no longer an issue
+                //     either.
+                Box::from_raw(chunk.as_ptr())
+            };
             cursor = chunk.next.get();
             unsafe {
                 // # Safety
                 //
                 //   - The safety invariant of `Self` relies on `buffer[.. len]`
                 //     being a slice of valid `T`s.
-                //
-                //   - `&mut Self` and `last` no longer used ensures that aliasing
-                //     is no longer an issue either.
                 let ptr: *mut T = chunk.buffer.as_mut_ptr().cast();
                 ptr::drop_in_place::<[T]>(
                     slice::from_raw_parts_mut(ptr, chunk.len.get())
                 );
             }
-            unsafe {
-                // # Safety
-                //
-                //   - The safety invariant of `Self` relies on the chunks having been
-                //     `Box`-allocated.
-                drop(Box::from_raw(chunk));
-            }
+            drop::<Box<_>>(chunk);
         }
     }
 }
@@ -249,7 +254,7 @@ impl<'a, T : 'a, const CHUNK_CAPACITY: usize> IntoIterator for &'a List<T, CHUNK
     }
 }
 
-/* == MARKER TRAITS & Safety ==
+/** == MARKER TRAITS AND SAFETY ==
  * Since it is not possible to mutate a `List` through a _shared_ reference to it
  * (its interior mutability being there just for soundness _w.r.t._ aliasing due
  * to the `last` field), List automagically ought to be:
@@ -258,36 +263,39 @@ impl<'a, T : 'a, const CHUNK_CAPACITY: usize> IntoIterator for &'a List<T, CHUNK
  *
  * Moreover, there is no reason not to be `Send` either (why is `UnsafeCell` not Send?)
  */
+const _: () = {
+    use ::std::panic;
 
-// We can delegate `RefUnWindSafe`-safety to its elements
-impl<T, const CHUNK_CAPACITY: usize> ::std::panic::RefUnwindSafe
-    for List<T, CHUNK_CAPACITY>
-where
-    T : ::std::panic::RefUnwindSafe,
-{}
+    // We can delegate `RefUnwindSafe`-safety to its elements
+    impl<T, const CHUNK_CAPACITY: usize> panic::RefUnwindSafe
+        for List<T, CHUNK_CAPACITY>
+    where
+        T : panic::RefUnwindSafe,
+    {}
 
-// # Safety: As stated above, we can delegate `Sync`-safety to its elements given
-// the lack of public interior mutability.
-unsafe impl<T, const CHUNK_CAPACITY: usize> Sync
-    for List<T, CHUNK_CAPACITY>
-where
-    T : Sync,
-{}
-// # Safety: As stated above, we can delegate `Send`-safety to its elements.
-unsafe impl<T, const CHUNK_CAPACITY: usize> Send
-    for List<T, CHUNK_CAPACITY>
-where
-    T : Send,
-{}
+    // # Safety: As stated above, we can delegate `Sync`-safety to its elements given
+    // the lack of public interior mutability.
+    unsafe impl<T, const CHUNK_CAPACITY: usize> Sync
+        for List<T, CHUNK_CAPACITY>
+    where
+        T : Sync,
+    {}
+    // # Safety: As stated above, we can delegate `Send`-safety to its elements.
+    unsafe impl<T, const CHUNK_CAPACITY: usize> Send
+        for List<T, CHUNK_CAPACITY>
+    where
+        T : Send,
+    {}
 
-// Can we delegate `UnwindSafe`-safety for its elements?
-// Since the only moment where custom panicking code runs in the middle of potentially
-// broken invariants is when `Drop` is run, it can CURRENTLY so be.
-impl<T, const CHUNK_CAPACITY: usize> ::std::panic::UnwindSafe
-    for List<T, CHUNK_CAPACITY>
-where
-    T : ::std::panic::UnwindSafe,
-{}
+    // Can we delegate `UnwindSafe`-safety for its elements?
+    // Since the only moment where custom panicking code runs in the middle of potentially
+    // broken invariants is when `Drop` is run, it can CURRENTLY so be.
+    impl<T, const CHUNK_CAPACITY: usize> panic::UnwindSafe
+        for List<T, CHUNK_CAPACITY>
+    where
+        T : panic::UnwindSafe,
+    {}
+};
 
 #[cfg(test)]
 mod tests;
